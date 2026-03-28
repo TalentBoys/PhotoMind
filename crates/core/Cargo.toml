@@ -1,0 +1,24 @@
+[package]
+name = "photomind-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+image.workspace = true
+kamadak-exif.workspace = true
+notify.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+sqlx.workspace = true
+photomind-storage.workspace = true
+photomind-tools.workspace = true

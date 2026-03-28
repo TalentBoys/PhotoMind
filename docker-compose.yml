@@ -1,0 +1,17 @@
+services:
+  photomind:
+    build: .
+    container_name: photomind
+    ports:
+      - "8080:8080"
+    volumes:
+      - photomind_data:/data
+      - /path/to/your/photos:/photos:ro  # Change this to your photos directory
+    environment:
+      - PHOTOMIND_DATA_DIR=/data
+      - PHOTOMIND_ADDR=0.0.0.0:8080
+      - RUST_LOG=info
+    restart: unless-stopped
+
+volumes:
+  photomind_data:
