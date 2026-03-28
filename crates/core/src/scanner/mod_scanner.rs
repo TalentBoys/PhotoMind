@@ -81,6 +81,9 @@ impl PhotoScanner {
         // Extract EXIF taken_at
         let taken_at = extract_exif_date(&data);
 
+        // Extract GPS coordinates
+        let (latitude, longitude) = extract_exif_gps(&data);
+
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -98,6 +101,8 @@ impl PhotoScanner {
             format,
             taken_at,
             file_hash: Some(hash),
+            latitude,
+            longitude,
         };
 
         PhotoRepo::insert(&self.pool, &new_photo).await?;
@@ -176,4 +181,52 @@ fn parse_exif_datetime(s: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
         .ok()
+}
+
+fn extract_exif_gps(data: &[u8]) -> (Option<f64>, Option<f64>) {
+    let mut cursor = std::io::Cursor::new(data);
+    let reader = exif::Reader::new();
+    let exif_data = match reader.read_from_container(&mut cursor).ok() {
+        Some(e) => e,
+        None => return (None, None),
+    };
+
+    let lat = exif_data
+        .get_field(exif::Tag::GPSLatitude, exif::In::PRIMARY)
+        .and_then(|f| gps_rational_to_decimal(&f.value));
+    let lat_ref = exif_data
+        .get_field(exif::Tag::GPSLatitudeRef, exif::In::PRIMARY)
+        .map(|f| f.display_value().to_string());
+
+    let lon = exif_data
+        .get_field(exif::Tag::GPSLongitude, exif::In::PRIMARY)
+        .and_then(|f| gps_rational_to_decimal(&f.value));
+    let lon_ref = exif_data
+        .get_field(exif::Tag::GPSLongitudeRef, exif::In::PRIMARY)
+        .map(|f| f.display_value().to_string());
+
+    match (lat, lon) {
+        (Some(mut la), Some(mut lo)) => {
+            if lat_ref.as_deref() == Some("S") {
+                la = -la;
+            }
+            if lon_ref.as_deref() == Some("W") {
+                lo = -lo;
+            }
+            (Some(la), Some(lo))
+        }
+        _ => (None, None),
+    }
+}
+
+fn gps_rational_to_decimal(value: &exif::Value) -> Option<f64> {
+    if let exif::Value::Rational(ref rats) = value {
+        if rats.len() >= 3 {
+            let degrees = rats[0].to_f64();
+            let minutes = rats[1].to_f64();
+            let seconds = rats[2].to_f64();
+            return Some(degrees + minutes / 60.0 + seconds / 3600.0);
+        }
+    }
+    None
 }

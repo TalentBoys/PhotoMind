@@ -7,8 +7,8 @@ pub struct PhotoRepo;
 impl PhotoRepo {
     pub async fn insert(pool: &SqlitePool, photo: &NewPhoto) -> Result<i64, StorageError> {
         let result = sqlx::query(
-            "INSERT INTO photos (file_path, file_name, file_size, width, height, format, taken_at, file_hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO photos (file_path, file_name, file_size, width, height, format, taken_at, file_hash, latitude, longitude)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&photo.file_path)
         .bind(&photo.file_name)
@@ -18,6 +18,8 @@ impl PhotoRepo {
         .bind(&photo.format)
         .bind(photo.taken_at)
         .bind(&photo.file_hash)
+        .bind(photo.latitude)
+        .bind(photo.longitude)
         .execute(pool)
         .await?;
 
@@ -120,6 +122,8 @@ struct PhotoRow {
     updated_at: chrono::NaiveDateTime,
     file_hash: Option<String>,
     embedded: bool,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
 }
 
 impl From<PhotoRow> for Photo {
@@ -137,6 +141,8 @@ impl From<PhotoRow> for Photo {
             updated_at: r.updated_at,
             file_hash: r.file_hash,
             embedded: r.embedded,
+            latitude: r.latitude,
+            longitude: r.longitude,
         }
     }
 }

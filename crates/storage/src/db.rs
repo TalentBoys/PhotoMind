@@ -113,6 +113,12 @@ impl Database {
         sqlx::query("ALTER TABLE tool_executions ADD COLUMN tool_call_id TEXT")
             .execute(&self.pool).await.ok();
 
+        // Migration: add GPS columns if missing
+        sqlx::query("ALTER TABLE photos ADD COLUMN latitude REAL")
+            .execute(&self.pool).await.ok();
+        sqlx::query("ALTER TABLE photos ADD COLUMN longitude REAL")
+            .execute(&self.pool).await.ok();
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS chat_messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

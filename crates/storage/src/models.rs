@@ -17,6 +17,8 @@ pub struct Photo {
     pub updated_at: NaiveDateTime,
     pub file_hash: Option<String>,
     pub embedded: bool,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ pub struct NewPhoto {
     pub format: Option<String>,
     pub taken_at: Option<NaiveDateTime>,
     pub file_hash: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
 }
 
 // ── Embedding ──
