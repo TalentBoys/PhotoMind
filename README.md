@@ -1,6 +1,13 @@
 # PhotoMind
 
-AI-powered photo search agent. Rust backend + React frontend, designed for NAS/Docker deployment.
+The most versatile AI-powered photo assistant. Designed for NAS/Docker deployment.
+
+- **AI Search** — Find photos by natural language or image similarity, powered by embedding vectors
+- **AI Management** — Chat with an AI agent to organize, move, and manage your photos
+- **AI Chat** — Conversational interface for photo operations with tool confirmation workflow
+- **Universal Compatibility** — Integrate with any photo album app via CLI or HTTP API tools
+
+Rust backend + React frontend. Supports Anthropic, Google, OpenAI, and any OpenAI-compatible provider.
 
 ## Prerequisites
 
