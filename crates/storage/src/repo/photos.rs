@@ -96,6 +96,13 @@ impl PhotoRepo {
             .await?;
         Ok(row.0)
     }
+
+    pub async fn count_unembedded(pool: &SqlitePool) -> Result<i64, StorageError> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM photos WHERE embedded = 0")
+            .fetch_one(pool)
+            .await?;
+        Ok(row.0)
+    }
 }
 
 // Internal row type for sqlx mapping

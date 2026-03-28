@@ -3,11 +3,13 @@ mod api;
 use anyhow::Result;
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
+use photomind_core::embedding::TaskProgress;
 use photomind_core::search::VectorIndex;
 use photomind_core::thumbnail::ThumbnailGenerator;
 use photomind_storage::Database;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -19,6 +21,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub thumbnails: Arc<ThumbnailGenerator>,
     pub vector_index: Arc<VectorIndex>,
+    pub task_progress: Arc<Mutex<TaskProgress>>,
+    pub task_paused: Arc<AtomicBool>,
+    pub task_cancelled: Arc<AtomicBool>,
 }
 
 #[tokio::main]
@@ -51,13 +56,16 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         thumbnails,
         vector_index,
+        task_progress: Arc::new(Mutex::new(TaskProgress::default())),
+        task_paused: Arc::new(AtomicBool::new(false)),
+        task_cancelled: Arc::new(AtomicBool::new(false)),
     };
 
-    // Spawn background scan + embed task
+    // Spawn background scan task (scan only, no embedding on startup)
     let scan_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = api::status::run_scan_and_embed(&scan_state).await {
-            tracing::error!("Initial scan+embed failed: {}", e);
+        if let Err(e) = api::status::run_scan_only(&scan_state).await {
+            tracing::error!("Initial scan failed: {}", e);
         }
     });
 
@@ -94,6 +102,19 @@ async fn main() -> Result<()> {
             "/settings/agent-models",
             post(api::settings::fetch_agent_models),
         )
+        .route("/browse-dirs", post(api::settings::browse_dirs))
+        .route(
+            "/settings/test-embedding",
+            post(api::settings::test_embedding),
+        )
+        .route(
+            "/settings/test-agent",
+            post(api::settings::test_agent),
+        )
+        .route(
+            "/settings/test-i2t",
+            post(api::settings::test_i2t),
+        )
         // Tools
         .route("/tools", get(api::tools::list_tools))
         .route("/tools", post(api::tools::create_tool))
@@ -102,14 +123,24 @@ async fn main() -> Result<()> {
         // Status
         .route("/status", get(api::status::get_status))
         .route("/scan", post(api::status::trigger_scan))
+        .route("/scan/progress", get(api::status::get_scan_progress))
+        .route("/scan/pause", post(api::status::pause_scan))
+        .route("/scan/resume", post(api::status::resume_scan))
+        .route("/scan/stop", post(api::status::stop_scan))
         // Search
         .route("/search", post(api::search::search_text))
         .route("/search/image", post(api::search::search_image))
         .route("/photos/{photo_id}/thumbnail", get(api::search::get_thumbnail))
+        .route("/photos/{photo_id}/preview", get(api::search::get_preview))
+        .route("/photos/{photo_id}/file", get(api::search::get_photo_file))
         .route("/photos/{photo_id}", get(api::search::get_photo_info))
         // Chat
         .route("/chat", post(api::chat::chat))
-        .route("/chat/confirm-tool", post(api::chat::confirm_tool));
+        .route("/chat/continue", post(api::chat::continue_chat))
+        .route("/chat/confirm-tool", post(api::chat::confirm_tool))
+        .route("/chat/sessions", get(api::chat::list_sessions))
+        .route("/chat/sessions/{session_id}", delete(api::chat::delete_session))
+        .route("/chat/sessions/{session_id}/messages", get(api::chat::get_session_messages));
 
     // Serve React frontend from dist/ or web/dist/
     let static_dir = if PathBuf::from("web/dist").exists() {

@@ -37,90 +37,81 @@ impl AgentEngine {
             .map(|p| Self::new(p))
     }
 
-    /// Run one turn of the agent conversation.
-    /// Returns the text response and any tool calls that need user confirmation.
+    /// Build the system message.
+    pub fn system_message() -> AgentMessage {
+        AgentMessage {
+            role: Role::System,
+            content: SYSTEM_PROMPT.to_string(),
+            tool_call_id: None,
+            raw_content: None,
+        }
+    }
+
+    /// Build tool definitions from enabled tools.
+    pub fn build_tool_definitions(tools: &[ToolDef]) -> Vec<ToolDefinition> {
+        tools
+            .iter()
+            .map(|t| {
+                let name = t.id.replace(':', "_");
+                ToolDefinition {
+                    name,
+                    description: t.description.clone().unwrap_or_default(),
+                    parameters: t.schema.clone().unwrap_or(serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    })),
+                }
+            })
+            .collect()
+    }
+
+    /// Call the LLM with messages and tools. This is a single turn — no loop.
+    pub async fn call(
+        &self,
+        messages: &[AgentMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<AgentResponse> {
+        let response = self.provider.chat(messages, tools).await?;
+
+        // Filter delete intent from tool calls
+        let filtered_tool_calls = filter_delete_intent(response.tool_calls);
+
+        Ok(AgentResponse {
+            content: response.content,
+            tool_calls: filtered_tool_calls,
+            raw_content: response.raw_content,
+        })
+    }
+
+    /// Run one turn of the agent conversation (legacy convenience wrapper).
     pub async fn chat(
         &self,
         history: &[AgentMessage],
         user_message: &str,
         enabled_tools: &[ToolDef],
     ) -> Result<AgentResponse> {
-        let mut messages = vec![AgentMessage {
-            role: Role::System,
-            content: SYSTEM_PROMPT.to_string(),
-            tool_call_id: None,
-        }];
+        let mut messages = vec![Self::system_message()];
 
-        // Add conversation history
         messages.extend_from_slice(history);
 
-        // Add the new user message
         messages.push(AgentMessage {
             role: Role::User,
             content: user_message.to_string(),
             tool_call_id: None,
+            raw_content: None,
         });
 
-        // Build tool definitions from enabled tools
-        let tool_defs = build_tool_definitions(enabled_tools);
-
-        // Call the LLM
-        let response = self.provider.chat(&messages, &tool_defs).await?;
-
-        // Check for delete intent in tool calls
-        let filtered_tool_calls = filter_delete_intent(response.tool_calls);
-
-        Ok(AgentResponse {
-            content: response.content,
-            tool_calls: filtered_tool_calls,
-        })
+        let tool_defs = Self::build_tool_definitions(enabled_tools);
+        self.call(&messages, &tool_defs).await
     }
-
-    /// Continue conversation after tool execution results.
-    pub async fn continue_with_tool_results(
-        &self,
-        history: &[AgentMessage],
-        enabled_tools: &[ToolDef],
-    ) -> Result<AgentResponse> {
-        let mut messages = vec![AgentMessage {
-            role: Role::System,
-            content: SYSTEM_PROMPT.to_string(),
-            tool_call_id: None,
-        }];
-
-        messages.extend_from_slice(history);
-
-        let tool_defs = build_tool_definitions(enabled_tools);
-        self.provider.chat(&messages, &tool_defs).await
-    }
-}
-
-fn build_tool_definitions(tools: &[ToolDef]) -> Vec<ToolDefinition> {
-    tools
-        .iter()
-        .map(|t| {
-            // Use the tool ID as the function name (sanitized)
-            let name = t.id.replace(':', "_");
-            ToolDefinition {
-                name,
-                description: t.description.clone().unwrap_or_default(),
-                parameters: t.schema.clone().unwrap_or(serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                })),
-            }
-        })
-        .collect()
 }
 
 /// Filter out any tool calls that look like delete operations.
-/// Replace them with a message suggesting to move instead.
 fn filter_delete_intent(tool_calls: Vec<AgentToolCall>) -> Vec<AgentToolCall> {
     tool_calls
         .into_iter()
         .filter(|tc| {
             let name_lower = tc.name.to_lowercase();
-            // Block any tool that looks like a delete operation
             !name_lower.contains("delete") && !name_lower.contains("remove") && !name_lower.contains("trash")
         })
         .collect()

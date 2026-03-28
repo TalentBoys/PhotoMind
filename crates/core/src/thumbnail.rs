@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 const THUMBNAIL_SIZE: u32 = 400;
+const PREVIEW_SIZE: u32 = 1600;
 
 pub struct ThumbnailGenerator {
     cache_dir: PathBuf,
@@ -16,45 +17,56 @@ impl ThumbnailGenerator {
         Ok(Self { cache_dir })
     }
 
-    /// Get or generate a thumbnail. Returns the JPEG bytes.
+    /// Get or generate a thumbnail (400px). Returns the JPEG bytes.
     pub async fn get_or_generate(&self, photo_id: i64, source_path: &str) -> Result<Vec<u8>> {
-        let cache_path = self.cache_path(photo_id);
+        let cache_path = self.cache_path(photo_id, "thumb");
 
-        // Check cache first
         if cache_path.exists() {
             return Ok(tokio::fs::read(&cache_path).await?);
         }
 
-        // Generate thumbnail
         let source = PathBuf::from(source_path);
         let cache = cache_path.clone();
-        let bytes = tokio::task::spawn_blocking(move || generate_thumbnail(&source, &cache))
+        let bytes = tokio::task::spawn_blocking(move || resize_and_cache(&source, &cache, THUMBNAIL_SIZE))
             .await??;
 
         Ok(bytes)
     }
 
-    fn cache_path(&self, photo_id: i64) -> PathBuf {
-        // Use subdirectories to avoid too many files in one dir
+    /// Get or generate a preview (1600px). Returns the JPEG bytes.
+    pub async fn get_or_generate_preview(&self, photo_id: i64, source_path: &str) -> Result<Vec<u8>> {
+        let cache_path = self.cache_path(photo_id, "preview");
+
+        if cache_path.exists() {
+            return Ok(tokio::fs::read(&cache_path).await?);
+        }
+
+        let source = PathBuf::from(source_path);
+        let cache = cache_path.clone();
+        let bytes = tokio::task::spawn_blocking(move || resize_and_cache(&source, &cache, PREVIEW_SIZE))
+            .await??;
+
+        Ok(bytes)
+    }
+
+    fn cache_path(&self, photo_id: i64, kind: &str) -> PathBuf {
         let subdir = format!("{:02}", photo_id % 100);
         let dir = self.cache_dir.join(&subdir);
         std::fs::create_dir_all(&dir).ok();
-        dir.join(format!("{}.jpg", photo_id))
+        dir.join(format!("{}_{}.jpg", photo_id, kind))
     }
 }
 
-fn generate_thumbnail(source: &Path, cache: &Path) -> Result<Vec<u8>> {
+fn resize_and_cache(source: &Path, cache: &Path, max_size: u32) -> Result<Vec<u8>> {
     let img = image::open(source)?;
-    let thumb = img.resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, FilterType::Lanczos3);
+    let resized = img.resize(max_size, max_size, FilterType::Lanczos3);
 
-    // Encode as JPEG
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
-    thumb.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
+    resized.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
 
-    // Save to cache
     if let Err(e) = std::fs::write(cache, &buf) {
-        warn!("Failed to cache thumbnail: {}", e);
+        warn!("Failed to cache image: {}", e);
     }
 
     Ok(buf)

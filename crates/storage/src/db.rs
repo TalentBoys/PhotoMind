@@ -98,6 +98,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS tool_executions (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 tool_id      TEXT NOT NULL REFERENCES tools(id),
+                tool_call_id TEXT,
                 params       TEXT NOT NULL,
                 result       TEXT,
                 status       TEXT NOT NULL DEFAULT 'pending_confirm',
@@ -107,6 +108,10 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // Migration: add tool_call_id column if missing
+        sqlx::query("ALTER TABLE tool_executions ADD COLUMN tool_call_id TEXT")
+            .execute(&self.pool).await.ok();
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS chat_messages (

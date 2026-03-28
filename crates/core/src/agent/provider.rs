@@ -86,6 +86,11 @@ impl AgentProvider {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
+                if matches!(m.role, Role::Assistant) {
+                    if let Some(ref raw) = m.raw_content {
+                        return raw.clone();
+                    }
+                }
                 let mut msg = json!({ "role": role, "content": &m.content });
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = json!(id);
@@ -163,10 +168,18 @@ impl AgentProvider {
                     }));
                 }
                 Role::Assistant => {
-                    anth_messages.push(json!({
-                        "role": "assistant",
-                        "content": &m.content,
-                    }));
+                    if let Some(ref raw) = m.raw_content {
+                        // Replay assistant message with tool_use content blocks
+                        anth_messages.push(json!({
+                            "role": "assistant",
+                            "content": raw,
+                        }));
+                    } else {
+                        anth_messages.push(json!({
+                            "role": "assistant",
+                            "content": &m.content,
+                        }));
+                    }
                 }
                 Role::Tool => {
                     anth_messages.push(json!({
@@ -205,9 +218,15 @@ impl AgentProvider {
             body["tools"] = json!(anth_tools);
         }
 
+        let url = format!("{}/v1/messages", self.base_url);
+        tracing::info!("Anthropic request URL: {}", url);
+
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!("Anthropic request body: {}", body_str);
+
         let resp = self
             .http
-            .post(format!("{}/v1/messages", self.base_url))
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -218,10 +237,14 @@ impl AgentProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!("Anthropic API failed: status={}, body={}", status, text);
             return Err(anyhow!("Anthropic API error {}: {}", status, text));
         }
 
-        let data: serde_json::Value = resp.json().await?;
+        let resp_text = resp.text().await?;
+        tracing::debug!("Anthropic response: {}", &resp_text[..resp_text.len().min(2000)]);
+        let data: serde_json::Value = serde_json::from_str(&resp_text)
+            .map_err(|e| anyhow!("Failed to parse Anthropic response JSON: {}. Body: {}", e, &resp_text[..resp_text.len().min(500)]))?;
         parse_anthropic_response(&data)
     }
 
@@ -249,10 +272,14 @@ impl AgentProvider {
                     }));
                 }
                 Role::Assistant => {
-                    contents.push(json!({
-                        "role": "model",
-                        "parts": [{ "text": &m.content }],
-                    }));
+                    if let Some(ref raw) = m.raw_content {
+                        contents.push(raw.clone());
+                    } else {
+                        contents.push(json!({
+                            "role": "model",
+                            "parts": [{ "text": &m.content }],
+                        }));
+                    }
                 }
                 Role::Tool => {
                     contents.push(json!({
@@ -295,12 +322,21 @@ impl AgentProvider {
             body["tools"] = json!(google_tools);
         }
 
+        let model_path = if self.model.starts_with("models/") {
+            self.model.clone()
+        } else {
+            format!("models/{}", self.model)
+        };
         let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            self.base_url, self.model, self.api_key
+            "{}/v1beta/{}:generateContent",
+            self.base_url, model_path
         );
 
-        let resp = self.http.post(&url).json(&body).send().await?;
+        let resp = self.http.post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -324,7 +360,7 @@ fn parse_openai_response(data: &serde_json::Value) -> Result<AgentResponse> {
     let message = &choice["message"];
     let content = message["content"].as_str().map(String::from);
 
-    let tool_calls = message["tool_calls"]
+    let tool_calls: Vec<AgentToolCall> = message["tool_calls"]
         .as_array()
         .map(|calls| {
             calls
@@ -344,9 +380,12 @@ fn parse_openai_response(data: &serde_json::Value) -> Result<AgentResponse> {
         })
         .unwrap_or_default();
 
+    let tool_calls_present = !tool_calls.is_empty();
+
     Ok(AgentResponse {
         content,
         tool_calls,
+        raw_content: if tool_calls_present { Some(message.clone()) } else { None },
     })
 }
 
@@ -386,6 +425,7 @@ fn parse_anthropic_response(data: &serde_json::Value) -> Result<AgentResponse> {
 
     Ok(AgentResponse {
         content,
+        raw_content: if tool_calls.is_empty() { None } else { Some(json!(content_blocks)) },
         tool_calls,
     })
 }
@@ -426,6 +466,7 @@ fn parse_google_response(data: &serde_json::Value) -> Result<AgentResponse> {
 
     Ok(AgentResponse {
         content,
+        raw_content: if tool_calls.is_empty() { None } else { Some(candidate["content"].clone()) },
         tool_calls,
     })
 }

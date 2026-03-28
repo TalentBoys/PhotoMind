@@ -105,6 +105,10 @@ export default function AddToolDialog({ open, onClose, onAdded }: AddToolDialogP
           </button>
         </div>
 
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+          <strong>Do not add delete/remove tools.</strong> The AI may misuse them. If you need to delete photos, let the AI move files to a "to-delete" folder, then delete manually.
+        </div>
+
         {error && (
           <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">
             {error}

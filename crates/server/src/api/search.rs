@@ -58,7 +58,13 @@ async fn get_embedding_client(state: &AppState) -> Option<EmbeddingClient> {
         .flatten()
         .and_then(|v| v.as_str().map(String::from));
 
-    EmbeddingClient::from_config(url.as_deref(), key.as_deref(), model.as_deref())
+    let dimension = ConfigRepo::get(pool, "embedding_dimension")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64().map(|n| n as u32));
+
+    EmbeddingClient::from_config(url.as_deref(), key.as_deref(), model.as_deref(), dimension)
 }
 
 pub async fn search_text(
@@ -74,7 +80,7 @@ pub async fn search_text(
         .await
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let query_vector = client
+    let (query_vector, _) = client
         .embed_text(&query)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -117,7 +123,7 @@ pub async fn search_image(
         .await
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let query_vector = client
+    let (query_vector, _) = client
         .embed_image(&data, &mime_type)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -168,6 +174,23 @@ pub async fn get_thumbnail(
     Ok(([(header::CONTENT_TYPE, "image/jpeg")], bytes))
 }
 
+pub async fn get_preview(
+    State(state): State<AppState>,
+    Path(photo_id): Path<i64>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let photo = PhotoRepo::get_by_id(state.db.pool(), photo_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let bytes = state
+        .thumbnails
+        .get_or_generate_preview(photo_id, &photo.file_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(([(header::CONTENT_TYPE, "image/jpeg")], bytes))
+}
+
 pub async fn get_photo_info(
     State(state): State<AppState>,
     Path(photo_id): Path<i64>,
@@ -176,4 +199,56 @@ pub async fn get_photo_info(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Json(photo))
+}
+
+pub async fn get_photo_file(
+    State(state): State<AppState>,
+    Path(photo_id): Path<i64>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let photo = PhotoRepo::get_by_id(state.db.pool(), photo_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let path = std::path::Path::new(&photo.file_path);
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let content_type = match photo.format.as_deref() {
+        Some("jpeg") | Some("jpg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("tiff") | Some("tif") => "image/tiff",
+        Some("heic") | Some("heif") => "image/heic",
+        _ => {
+            // Guess from extension
+            match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+                Some("jpg") | Some("jpeg") => "image/jpeg",
+                Some("png") => "image/png",
+                Some("gif") => "image/gif",
+                Some("webp") => "image/webp",
+                Some("bmp") => "image/bmp",
+                Some("tiff") | Some("tif") => "image/tiff",
+                Some("heic") | Some("heif") => "image/heic",
+                _ => "application/octet-stream",
+            }
+        }
+    };
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", photo.file_name),
+            ),
+        ],
+        bytes,
+    ))
 }

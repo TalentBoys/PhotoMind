@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Search, ImagePlus } from 'lucide-react';
+import PhotoLightbox from '@/components/PhotoLightbox';
 
 interface SearchResult {
   id: number;
@@ -13,26 +14,35 @@ interface SearchResult {
   file_size?: number;
 }
 
+const PAGE_SIZE = 3;
+const FETCH_LIMIT = 30;
+
 export default function SearchPage() {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [allResults, setAllResults] = useState<SearchResult[]>([]);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  const results = allResults.slice(0, visibleCount);
+  const hasMore = visibleCount < allResults.length;
 
   const handleSearch = async (e: FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
     setLoading(true);
     setSearched(true);
+    setVisibleCount(PAGE_SIZE);
     try {
       const res = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: query.trim(), limit: 40 }),
+        body: JSON.stringify({ query: query.trim(), limit: FETCH_LIMIT }),
       });
       if (res.ok) {
         const data = await res.json();
-        setResults(data.results ?? []);
+        setAllResults(data.results ?? []);
       }
     } finally {
       setLoading(false);
@@ -42,9 +52,10 @@ export default function SearchPage() {
   const handleImageSearch = async (file: File) => {
     setLoading(true);
     setSearched(true);
+    setVisibleCount(PAGE_SIZE);
     const formData = new FormData();
     formData.append('image', file);
-    formData.append('limit', '40');
+    formData.append('limit', String(FETCH_LIMIT));
     try {
       const res = await fetch('/api/search/image', {
         method: 'POST',
@@ -52,12 +63,14 @@ export default function SearchPage() {
       });
       if (res.ok) {
         const data = await res.json();
-        setResults(data.results ?? []);
+        setAllResults(data.results ?? []);
       }
     } finally {
       setLoading(false);
     }
   };
+
+  const photos = results.map((r) => ({ id: r.id, file_name: r.file_name }));
 
   return (
     <div className="flex flex-col items-center px-4 pt-20">
@@ -103,11 +116,12 @@ export default function SearchPage() {
       )}
 
       {results.length > 0 && (
-        <div className="w-full max-w-6xl grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-          {results.map((r) => (
+        <div className="w-full max-w-4xl grid grid-cols-3 gap-4">
+          {results.map((r, idx) => (
             <div
               key={r.id}
               className="group relative aspect-square rounded-lg overflow-hidden border border-border bg-muted cursor-pointer"
+              onClick={() => setLightboxIndex(idx)}
             >
               <img
                 src={`/api/photos/${r.id}/thumbnail`}
@@ -126,6 +140,23 @@ export default function SearchPage() {
           ))}
         </div>
       )}
+
+      {hasMore && !loading && (
+        <button
+          onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
+          className="mt-6 px-6 py-2 rounded-xl border border-input bg-card text-foreground hover:bg-muted"
+        >
+          Show More
+        </button>
+      )}
+
+      {!hasMore && allResults.length > 0 && visibleCount >= allResults.length && !loading && (
+        <p className="mt-6 text-sm text-muted-foreground">
+          No more results. Try a different description to continue searching.
+        </p>
+      )}
+
+      <PhotoLightbox photos={photos} openIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />
     </div>
   );
 }
