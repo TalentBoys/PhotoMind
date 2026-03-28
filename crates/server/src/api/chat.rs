@@ -1,6 +1,7 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Path, State};
+use axum::http::{header, StatusCode};
 use axum::Json;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -87,12 +88,34 @@ fn tool_name_to_id(name: &str) -> String {
     }
 }
 
-fn db_messages_to_agent(msgs: &[photomind_storage::models::ChatMessage]) -> Vec<AgentMessage> {
+fn db_messages_to_agent(msgs: &[photomind_storage::models::ChatMessage], data_dir: &std::path::Path) -> Vec<AgentMessage> {
     msgs.iter().map(|m| {
         let raw_content = if m.role == "assistant" {
             m.metadata.as_ref().and_then(|meta| meta.get("raw_content").cloned())
         } else {
             None
+        };
+        // Reconstruct image data for user messages with attached images
+        let (image_b64, image_mime) = if m.role == "user" {
+            if let Some(meta) = &m.metadata {
+                let filename = meta.get("image_filename").and_then(|v| v.as_str());
+                let mime = meta.get("image_mime").and_then(|v| v.as_str());
+                if let (Some(filename), Some(mime)) = (filename, mime) {
+                    let path = data_dir.join("chat_images").join(filename);
+                    if let Ok(data) = std::fs::read(&path) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        (Some(b64), Some(mime.to_string()))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
         };
         AgentMessage {
             role: match m.role.as_str() {
@@ -108,6 +131,8 @@ fn db_messages_to_agent(msgs: &[photomind_storage::models::ChatMessage]) -> Vec<
                 None
             },
             raw_content,
+            image_b64,
+            image_mime,
         }
     }).collect()
 }
@@ -212,6 +237,8 @@ async fn run_agent_loop(
             content: content.clone(),
             tool_call_id: None,
             raw_content: response.raw_content.clone(),
+            image_b64: None,
+            image_mime: None,
         });
 
         // Execute auto-approved tools
@@ -233,6 +260,8 @@ async fn run_agent_loop(
                 content: result_str,
                 tool_call_id: Some(tc.id.clone()),
                 raw_content: None,
+                image_b64: None,
+                image_mime: None,
             });
 
             all_auto_results.push(AutoToolResult {
@@ -338,12 +367,14 @@ pub async fn chat(
 
     // Build message list
     let mut messages = vec![AgentEngine::system_message()];
-    messages.extend(db_messages_to_agent(&db_messages));
+    messages.extend(db_messages_to_agent(&db_messages, &state.data_dir));
     messages.push(AgentMessage {
         role: Role::User,
         content: req.message.clone(),
         tool_call_id: None,
         raw_content: None,
+        image_b64: None,
+        image_mime: None,
     });
 
     let response = run_agent_loop(
@@ -351,6 +382,154 @@ pub async fn chat(
     ).await?;
 
     Ok(Json(response))
+}
+
+// ── POST /api/chat/upload (multipart with optional image) ──
+
+pub async fn chat_with_image(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<ChatResponse>, StatusCode> {
+    let mut session_id = String::new();
+    let mut message = String::new();
+    let mut auto_approve_tools: Vec<String> = Vec::new();
+    let mut image_data: Option<Vec<u8>> = None;
+    let mut image_mime = "image/jpeg".to_string();
+
+    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "session_id" => {
+                session_id = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            }
+            "message" => {
+                message = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+            }
+            "auto_approve_tools" => {
+                let text = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                auto_approve_tools = serde_json::from_str(&text).unwrap_or_default();
+            }
+            "image" => {
+                if let Some(ct) = field.content_type() {
+                    image_mime = ct.to_string();
+                }
+                image_data = Some(field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    if session_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let pool = state.db.pool();
+
+    // Save image to disk if present
+    let mut user_metadata = serde_json::Map::new();
+    let mut image_b64: Option<String> = None;
+    let mut image_mime_val: Option<String> = None;
+
+    if let Some(data) = &image_data {
+        let ext = match image_mime.as_str() {
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+        let chat_images_dir = state.data_dir.join("chat_images");
+        tokio::fs::create_dir_all(&chat_images_dir).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let filepath = chat_images_dir.join(&filename);
+        tokio::fs::write(&filepath, data).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        user_metadata.insert("image_filename".to_string(), serde_json::json!(filename));
+        user_metadata.insert("image_mime".to_string(), serde_json::json!(&image_mime));
+
+        image_b64 = Some(base64::engine::general_purpose::STANDARD.encode(data));
+        image_mime_val = Some(image_mime.clone());
+    }
+
+    let metadata = if user_metadata.is_empty() { None } else { Some(serde_json::Value::Object(user_metadata)) };
+
+    // Load chat history
+    let db_messages = ChatRepo::get_session_messages(pool, &session_id, 50)
+        .await.map_err(|e| {
+            tracing::error!("Failed to load chat history: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Save user message
+    ChatRepo::insert(pool, &NewChatMessage {
+        session_id: session_id.clone(),
+        role: "user".to_string(),
+        content: message.clone(),
+        metadata,
+    }).await.map_err(|e| {
+        tracing::error!("Failed to save user message: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let engine = match get_agent_engine(&state).await {
+        Some(e) => e,
+        None => {
+            let content = "Agent not configured yet. Please set up an Agent model in Settings.".to_string();
+            save_assistant_msg(pool, &session_id, &content, None, None).await;
+            return Ok(Json(ChatResponse {
+                content,
+                tool_calls: vec![],
+                auto_results: vec![],
+                done: true,
+            }));
+        }
+    };
+
+    let enabled_tools = ToolRepo::list_enabled(pool).await.map_err(|e| {
+        tracing::error!("Failed to load enabled tools: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let tool_defs = AgentEngine::build_tool_definitions(&enabled_tools);
+
+    let mut messages = vec![AgentEngine::system_message()];
+    messages.extend(db_messages_to_agent(&db_messages, &state.data_dir));
+    messages.push(AgentMessage {
+        role: Role::User,
+        content: message,
+        tool_call_id: None,
+        raw_content: None,
+        image_b64,
+        image_mime: image_mime_val,
+    });
+
+    let response = run_agent_loop(
+        &state, &engine, &mut messages, &tool_defs, &auto_approve_tools, &session_id,
+    ).await?;
+
+    Ok(Json(response))
+}
+
+// ── GET /api/chat/images/{filename} ──
+
+pub async fn get_chat_image(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    // Sanitize filename to prevent directory traversal
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = state.data_dir.join("chat_images").join(&filename);
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/jpeg",
+    };
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes))
 }
 
 // ── POST /api/chat/continue ──
@@ -428,7 +607,7 @@ pub async fn continue_chat(
         .await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut messages = vec![AgentEngine::system_message()];
-    messages.extend(db_messages_to_agent(&all_db_messages));
+    messages.extend(db_messages_to_agent(&all_db_messages, &state.data_dir));
 
     let mut response = run_agent_loop(
         &state, &engine, &mut messages, &tool_defs, &req.auto_approve_tools, &req.session_id,

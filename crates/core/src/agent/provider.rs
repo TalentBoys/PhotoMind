@@ -91,6 +91,22 @@ impl AgentProvider {
                         return raw.clone();
                     }
                 }
+                // Multimodal user message with image
+                if matches!(m.role, Role::User) {
+                    if let (Some(b64), Some(mime)) = (&m.image_b64, &m.image_mime) {
+                        let mut content = vec![
+                            json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime, b64)}}),
+                        ];
+                        if !m.content.is_empty() {
+                            content.push(json!({"type": "text", "text": &m.content}));
+                        }
+                        let mut msg = json!({"role": role, "content": content});
+                        if let Some(ref id) = m.tool_call_id {
+                            msg["tool_call_id"] = json!(id);
+                        }
+                        return msg;
+                    }
+                }
                 let mut msg = json!({ "role": role, "content": &m.content });
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = json!(id);
@@ -162,10 +178,28 @@ impl AgentProvider {
                     system_prompt = m.content.clone();
                 }
                 Role::User => {
-                    anth_messages.push(json!({
-                        "role": "user",
-                        "content": &m.content,
-                    }));
+                    // Multimodal user message with image
+                    if let (Some(b64), Some(mime)) = (&m.image_b64, &m.image_mime) {
+                        let mut content = vec![
+                            json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime,
+                                    "data": b64,
+                                }
+                            }),
+                        ];
+                        if !m.content.is_empty() {
+                            content.push(json!({"type": "text", "text": &m.content}));
+                        }
+                        anth_messages.push(json!({"role": "user", "content": content}));
+                    } else {
+                        anth_messages.push(json!({
+                            "role": "user",
+                            "content": &m.content,
+                        }));
+                    }
                 }
                 Role::Assistant => {
                     if let Some(ref raw) = m.raw_content {
@@ -266,10 +300,21 @@ impl AgentProvider {
                     }));
                 }
                 Role::User => {
-                    contents.push(json!({
-                        "role": "user",
-                        "parts": [{ "text": &m.content }],
-                    }));
+                    // Multimodal user message with image
+                    if let (Some(b64), Some(mime)) = (&m.image_b64, &m.image_mime) {
+                        let mut parts = vec![
+                            json!({"inlineData": {"mimeType": mime, "data": b64}}),
+                        ];
+                        if !m.content.is_empty() {
+                            parts.push(json!({"text": &m.content}));
+                        }
+                        contents.push(json!({"role": "user", "parts": parts}));
+                    } else {
+                        contents.push(json!({
+                            "role": "user",
+                            "parts": [{ "text": &m.content }],
+                        }));
+                    }
                 }
                 Role::Assistant => {
                     if let Some(ref raw) = m.raw_content {

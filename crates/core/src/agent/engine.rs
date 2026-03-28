@@ -44,6 +44,8 @@ impl AgentEngine {
             content: SYSTEM_PROMPT.to_string(),
             tool_call_id: None,
             raw_content: None,
+            image_b64: None,
+            image_mime: None,
         }
     }
 
@@ -99,6 +101,8 @@ impl AgentEngine {
             content: user_message.to_string(),
             tool_call_id: None,
             raw_content: None,
+            image_b64: None,
+            image_mime: None,
         });
 
         let tool_defs = Self::build_tool_definitions(enabled_tools);

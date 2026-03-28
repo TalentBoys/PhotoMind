@@ -136,6 +136,8 @@ async fn main() -> Result<()> {
         .route("/photos/{photo_id}", get(api::search::get_photo_info))
         // Chat
         .route("/chat", post(api::chat::chat))
+        .route("/chat/upload", post(api::chat::chat_with_image))
+        .route("/chat/images/{filename}", get(api::chat::get_chat_image))
         .route("/chat/continue", post(api::chat::continue_chat))
         .route("/chat/confirm-tool", post(api::chat::confirm_tool))
         .route("/chat/sessions", get(api::chat::list_sessions))

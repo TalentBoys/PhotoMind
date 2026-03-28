@@ -246,6 +246,8 @@ pub async fn test_agent(
         content: "Say hello in one sentence.".to_string(),
         tool_call_id: None,
         raw_content: None,
+        image_b64: None,
+        image_mime: None,
     }];
     match provider.chat(&messages, &[]).await {
         Ok(resp) => {

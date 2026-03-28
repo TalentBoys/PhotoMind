@@ -22,6 +22,12 @@ pub struct AgentMessage {
     /// Raw provider-specific content blocks (for replaying assistant messages with tool_use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_content: Option<serde_json::Value>,
+    /// Base64-encoded image data (for multimodal user messages)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_b64: Option<String>,
+    /// MIME type of the attached image (e.g. "image/jpeg")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_mime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

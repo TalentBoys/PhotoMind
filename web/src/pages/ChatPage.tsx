@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, type FormEvent } from 'react';
-import { Send, ImagePlus, CheckCircle, XCircle, Plus, Trash2, MessageSquare, ShieldCheck, Loader2 } from 'lucide-react';
+import { Send, ImagePlus, CheckCircle, XCircle, Plus, Trash2, MessageSquare, ShieldCheck, Loader2, X } from 'lucide-react';
 import PhotoLightbox, { type PhotoItem } from '@/components/PhotoLightbox';
 
 interface Message {
@@ -8,6 +8,7 @@ interface Message {
   content: string;
   tool_call?: ToolCall;
   search_results?: SearchResultItem[];
+  imageUrl?: string;
 }
 
 interface ToolCall {
@@ -65,6 +66,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [lightbox, setLightbox] = useState<{ photos: PhotoItem[]; index: number } | null>(null);
+  const [attachedImage, setAttachedImage] = useState<{ file: File; previewUrl: string } | null>(null);
   const [autoApproveTools, setAutoApproveTools] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem('photomind_auto_approve_tools');
@@ -92,7 +94,10 @@ export default function ChatPage() {
         const msgs: Message[] = [];
         for (const m of data) {
           if (m.role === 'user' || m.role === 'assistant') {
-            msgs.push({ id: String(m.id), role: m.role, content: m.content });
+            const imageUrl = m.role === 'user' && m.metadata?.image_filename
+              ? `/api/chat/images/${m.metadata.image_filename}`
+              : undefined;
+            msgs.push({ id: String(m.id), role: m.role, content: m.content, imageUrl });
           }
           // Tool result messages are part of the loop context, show them as photo results
           if (m.role === 'tool') {
@@ -169,24 +174,57 @@ export default function ChatPage() {
     return data.tool_calls ?? [];
   };
 
+  const clearAttachedImage = () => {
+    if (attachedImage) {
+      URL.revokeObjectURL(attachedImage.previewUrl);
+      setAttachedImage(null);
+    }
+  };
+
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      clearAttachedImage();
+      setAttachedImage({ file, previewUrl: URL.createObjectURL(file) });
+    }
+    e.target.value = '';
+  };
+
   const sendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || loading) return;
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: input.trim() };
+    if ((!input.trim() && !attachedImage) || loading) return;
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: input.trim(),
+      imageUrl: attachedImage?.previewUrl,
+    };
     setMessages((prev) => [...prev, userMsg]);
+    const currentImage = attachedImage;
     setInput('');
+    setAttachedImage(null);
     setLoading(true);
 
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: activeSessionId,
-          message: userMsg.content,
-          auto_approve_tools: [...autoApproveTools],
-        }),
-      });
+      let res: Response;
+      if (currentImage) {
+        const formData = new FormData();
+        formData.append('session_id', activeSessionId);
+        formData.append('message', userMsg.content);
+        formData.append('auto_approve_tools', JSON.stringify([...autoApproveTools]));
+        formData.append('image', currentImage.file);
+        res = await fetch('/api/chat/upload', { method: 'POST', body: formData });
+      } else {
+        res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: activeSessionId,
+            message: userMsg.content,
+            auto_approve_tools: [...autoApproveTools],
+          }),
+        });
+      }
       if (res.ok) {
         const data: ApiChatResponse = await res.json();
         const pendingTools = processChatResponse(data);
@@ -365,7 +403,10 @@ export default function ChatPage() {
                 <div className={`rounded-xl px-4 py-2.5 ${
                   m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-card border border-border'
                 }`}>
-                  <p className="whitespace-pre-wrap">{m.content}</p>
+                  {m.imageUrl && (
+                    <img src={m.imageUrl} alt="Attached" className="max-w-48 max-h-48 rounded-lg mb-2 object-cover" />
+                  )}
+                  {m.content && <p className="whitespace-pre-wrap">{m.content}</p>}
                 </div>
               )}
             </div>
@@ -380,11 +421,21 @@ export default function ChatPage() {
           <div ref={bottomRef} />
         </div>
 
-        <form onSubmit={sendMessage} className="border-t border-border p-4 flex gap-2 max-w-2xl mx-auto w-full">
-          <label className="px-3 py-2.5 rounded-xl border border-input bg-card hover:bg-muted cursor-pointer flex items-center">
-            <ImagePlus className="w-5 h-5 text-muted-foreground" />
-            <input type="file" accept="image/*" className="hidden" onChange={() => {}} />
-          </label>
+        <div className="border-t border-border max-w-2xl mx-auto w-full">
+          {attachedImage && (
+            <div className="px-4 pt-3 flex items-center gap-2">
+              <img src={attachedImage.previewUrl} alt="Attached" className="w-12 h-12 rounded-lg object-cover border border-border" />
+              <span className="text-sm text-muted-foreground truncate flex-1">{attachedImage.file.name}</span>
+              <button type="button" onClick={clearAttachedImage} className="p-1 rounded-lg hover:bg-muted">
+                <X className="w-4 h-4 text-muted-foreground" />
+              </button>
+            </div>
+          )}
+          <form onSubmit={sendMessage} className="p-4 flex gap-2">
+            <label className="px-3 py-2.5 rounded-xl border border-input bg-card hover:bg-muted cursor-pointer flex items-center">
+              <ImagePlus className="w-5 h-5 text-muted-foreground" />
+              <input type="file" accept="image/*" className="hidden" onChange={handleImageSelect} />
+            </label>
           <input
             type="text"
             value={input}
@@ -394,12 +445,13 @@ export default function ChatPage() {
           />
           <button
             type="submit"
-            disabled={loading || !input.trim()}
+            disabled={loading || (!input.trim() && !attachedImage)}
             className="px-4 py-2.5 rounded-xl bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             <Send className="w-5 h-5" />
           </button>
         </form>
+        </div>
       </div>
 
       <PhotoLightbox
